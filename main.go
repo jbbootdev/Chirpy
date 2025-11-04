@@ -1,14 +1,22 @@
 package main
 
 import (
+	"chirpy/internal/database"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	db             *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -29,11 +37,6 @@ func (cfg *apiConfig) adminMetricsHandler(w http.ResponseWriter, r *http.Request
 		</html>`, cfg.fileserverHits.Load())
 	w.Write([]byte(html))
 }
-
-// func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
-// 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-// 	fmt.Fprintf(w, "Hits: %d", cfg.fileserverHits.Load())
-// }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0) // Reset the counter
@@ -64,8 +67,22 @@ func (cfg *apiConfig) validateChirpHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// If valid
-	jsonResponse(w, http.StatusOK, map[string]bool{"valid": true})
+	profane := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	// split on a single space so punctuation tokens (e.g., "Sharbert!") are NOT matched
+	parts := strings.Split(request.Body, " ")
+	for i, tok := range parts {
+		if _, bad := profane[strings.ToLower(tok)]; bad {
+			parts[i] = "****"
+		}
+	}
+	cleaned := strings.Join(parts, " ")
+
+	jsonResponse(w, http.StatusOK, map[string]string{"body": cleaned})
 }
 
 func jsonResponse(w http.ResponseWriter, statusCode int, response interface{}) {
@@ -82,8 +99,20 @@ func jsonResponse(w http.ResponseWriter, statusCode int, response interface{}) {
 }
 
 func main() {
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		panic(err)
+	}
+
+	dbQueries := database.New(db)
+
 	mux := http.NewServeMux()
-	apiCfg := &apiConfig{}
+	apiCfg := &apiConfig{
+		db: dbQueries,
+	}
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -102,7 +131,7 @@ func main() {
 		Handler: mux,
 	}
 
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err != nil {
 		panic(err)
 	}
