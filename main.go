@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"chirpy/internal/auth"
 	"chirpy/internal/database"
 
 	"github.com/google/uuid"
@@ -57,7 +58,55 @@ type UserResponse struct {
 }
 
 type UserRequest struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UserRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadGateway)
+		return
+	}
+
+	if req.Email == "" || !isValidEmailFormat(req.Email) {
+		http.Error(w, "Invalid or missing email address", http.StatusBadRequest)
+		return
+	}
+
+	if req.Password == "" {
+		http.Error(w, "Invalid or missing password", http.StatusBadRequest)
+		return
+	}
+	// Look up the user by email - you'll need a database query for this. Do you have a GetUserByEmail query in your sql/queries/users.sql file?
+	user, err := cfg.db.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		http.Error(w, "Incorrect email or password", http.StatusUnauthorized)
+		return
+	}
+
+	passwordValid, err := auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil || passwordValid == false {
+		http.Error(w, "Incorrect email or password", http.StatusUnauthorized)
+		return
+	}
+
+	response := UserResponse{
+		ID:        user.ID.String(),
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (cfg *apiConfig) adminResetHandler(w http.ResponseWriter, r *http.Request) {
@@ -109,14 +158,25 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Invalid or missing email address", http.StatusBadRequest)
 		return
 	}
+
+	if req.Password == "" {
+		http.Error(w, "Invalid or missing password", http.StatusBadRequest)
+		return
+	}
 	// Generate UUID
 
 	userID := uuid.New()
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		http.Error(w, "Error validating password", http.StatusBadRequest)
+		return
+	}
 
 	// Actually save to database!
 	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
-		ID:    userID,
-		Email: req.Email,
+		ID:             userID,
+		Email:          req.Email,
+		HashedPassword: hash,
 	})
 	if err != nil {
 		fmt.Println("Error creating user:", err)
@@ -363,6 +423,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsList)
 	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 
 	server := &http.Server{
 		Addr:    ":8080",
